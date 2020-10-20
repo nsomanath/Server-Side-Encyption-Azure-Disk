@@ -1,0 +1,96 @@
+subcripiton=<Your subcripiton ID>
+
+
+
+#Login to Azure Cloud
+az login 
+
+#If you have more than one subcription, you can set intended subcription here
+az account set --subscription "$subcripiton"
+
+#set all neccesary variables
+myResourceGroup='DiskEncryptionResources'
+location='eastus'
+vmName='myVM01'
+keyVaultName='keyValut-disk-encyp-01' 
+diskEncryptionSetName='disk-encry-set-01'
+KeyName='disk-encyp-key'
+
+#Create Resource Group
+az group create --name $myResourceGroup --location $location
+
+
+#Create a virtual machine with default disk
+az vm create \
+  --resource-group $myResourceGroup \
+  --name $vmName \
+  --image UbuntuLTS \
+  --admin-username azureuser \
+  --generate-ssh-keys
+
+
+#Create Azure Key valut to Store disk encryption key
+az keyvault create \
+   --name $keyVaultName \
+   --resource-group $myResourceGroup \
+   --location $location \
+   --enable-purge-protection true 
+
+
+#Create EncryptionKey in keyValut4disk-encyption
+az keyvault key create \
+   --vault-name $keyVaultName \
+   --name $KeyName \
+   --kty RSA
+
+    
+#Get the KeyValut Id
+keyVaultId=$(az keyvault show --name $keyVaultName --query [id] -o tsv)
+
+#Get the KeyValut key URL
+keyVaultKeyUrl=$(az keyvault key show --vault-name $keyVaultName --name $KeyName --query [key.kid] -o tsv)
+
+
+
+#Create an instance of DiskEncryptionSet by specifying a key in your Key Vault.
+az disk-encryption-set create \
+    -n $diskEncryptionSetName \
+    -l $location \
+    -g $myResourceGroup \
+    --source-vault $keyVaultId \
+    --key-url $keyVaultKeyUrl
+
+#When a disk encryption set is created, a system-assigned managed identity is created in Azure Active Directory (AD) 
+#and associated with the disk encryption set.
+#The identity must have access to the Key Vault to perform required operations such as wrapkey, unwrapkey and get. 
+
+desIdentity=$(az disk-encryption-set show -n $diskEncryptionSetName -g $myResourceGroup --query [identity.principalId] -o tsv)
+
+az keyvault set-policy \
+    -n  $keyVaultName  \
+    -g $myResourceGroup \
+    --object-id $desIdentity \
+    --key-permissions wrapkey unwrapkey get
+
+ 
+ #To enable the encryption for disks attached to a VM, you must stop(deallocate) a virtual machine.
+ az vm deallocate --resource-group $myResourceGroup --name $vmName 
+
+ #Enable the encryption for an attached disk by associating it with the instance of DiskEncryptionSet.
+ diskEncryptionSetId=$(az disk-encryption-set show -n $diskEncryptionSetName -g $myResourceGroup --query [id] -o tsv)
+
+#Fetch the VM disk name
+vmDiskName=$(az disk list -g $myResourceGroup --query "[?contains(name,'$vmName')].{Name:name}" -o tsv)
+
+#Apply Server side disk encryption using customer managedkey
+az disk update \
+ -n $vmDiskName \
+ -g $myResourceGroup \
+ --encryption-type EncryptionAtRestWithCustomerKey \
+ --disk-encryption-set $diskEncryptionSetId
+
+#Show the disk encryption type
+ az disk show -g $myResourceGroup -n $vmDiskName --query [encryption.type] -o tsv
+
+ #When you disable or delete your key, any VMs with disks using that key will automatically shut down.
+ #After this, the VMs will not be usable unless the key is enabled again or you assign a new key.
